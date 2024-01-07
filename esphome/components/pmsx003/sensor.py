@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor, uart
+from esphome.core import TimePeriod
 
 from esphome.const import (
     CONF_FORMALDEHYDE,
@@ -33,6 +34,8 @@ from esphome.const import (
     UNIT_COUNT_DECILITRE,
     UNIT_PERCENT,
 )
+
+CONF_STABILISING_TIME = "stabilising_time"
 
 DEPENDENCIES = ["uart"]
 
@@ -184,6 +187,10 @@ CONFIG_SCHEMA = (
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
             cv.Optional(CONF_UPDATE_INTERVAL, default="0s"): validate_update_interval,
+            cv.Optional(CONF_STABILISING_TIME, default="30s"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(min=TimePeriod(seconds=30)),
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -268,5 +275,9 @@ async def to_code(config):
     if CONF_FORMALDEHYDE in config:
         sens = await sensor.new_sensor(config[CONF_FORMALDEHYDE])
         cg.add(var.set_formaldehyde_sensor(sens))
+
+    stabilising_time = config.get(CONF_STABILISING_TIME)
+    if stabilising_time is not None:
+        cg.add(var.set_stabilising_time(stabilising_time))
 
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))

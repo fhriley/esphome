@@ -53,7 +53,7 @@ void PMSX003Component::loop() {
   // If we update less often than it takes the device to stabilise, spin the fan down
   // rather than running it constantly. It does take some time to stabilise, so we
   // need to keep track of what state we're in.
-  if (this->update_interval_ > PMS_STABILISING_MS) {
+  if (this->update_interval_ > stabilising_ms_) {
     if (this->initialised_ == 0) {
       this->send_command_(PMS_CMD_AUTO_MANUAL, 0);
       this->send_command_(PMS_CMD_ON_STANDBY, 1);
@@ -62,7 +62,7 @@ void PMSX003Component::loop() {
     switch (this->state_) {
       case PMSX003_STATE_IDLE:
         // Power on the sensor now so it'll be ready when we hit the update time
-        if (now - this->last_update_ < (this->update_interval_ - PMS_STABILISING_MS))
+        if (now - this->last_update_ < (this->update_interval_ - stabilising_ms_))
           return;
 
         this->state_ = PMSX003_STATE_STABILISING;
@@ -71,7 +71,7 @@ void PMSX003Component::loop() {
         return;
       case PMSX003_STATE_STABILISING:
         // wait for the sensor to be stable
-        if (now - this->fan_on_time_ < PMS_STABILISING_MS)
+        if (now - this->fan_on_time_ < stabilising_ms_)
           return;
         // consume any command responses that are in the serial buffer
         while (this->available())
@@ -320,7 +320,7 @@ void PMSX003Component::parse_data_() {
 
   // Spin down the sensor again if we aren't going to need it until more time has
   // passed than it takes to stabilise
-  if (this->update_interval_ > PMS_STABILISING_MS) {
+  if (this->update_interval_ > stabilising_ms_) {
     this->send_command_(PMS_CMD_ON_STANDBY, 0);
     this->state_ = PMSX003_STATE_IDLE;
   }
