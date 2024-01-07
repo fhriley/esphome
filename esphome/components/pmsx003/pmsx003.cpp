@@ -54,16 +54,15 @@ void PMSX003Component::loop() {
   // rather than running it constantly. It does take some time to stabilise, so we
   // need to keep track of what state we're in.
   if (this->update_interval_ > stabilising_ms_) {
-    if (this->initialised_ == 0) {
-      this->send_command_(PMS_CMD_AUTO_MANUAL, 0);
-      this->send_command_(PMS_CMD_ON_STANDBY, 1);
-      this->initialised_ = 1;
-    }
     switch (this->state_) {
       case PMSX003_STATE_IDLE:
         // Power on the sensor now so it'll be ready when we hit the update time
-        if (now - this->last_update_ < (this->update_interval_ - stabilising_ms_))
+        if (this->initialised_ == 0) {
+          this->send_command_(PMS_CMD_AUTO_MANUAL, 0);
+          this->initialised_ = 1;
+        } else if (now - this->last_update_ < (this->update_interval_ - stabilising_ms_)) {
           return;
+        }
 
         this->state_ = PMSX003_STATE_STABILISING;
         this->send_command_(PMS_CMD_ON_STANDBY, 1);
@@ -331,7 +330,7 @@ uint16_t PMSX003Component::get_16_bit_uint_(uint8_t start_index) {
   return (uint16_t(this->data_[start_index]) << 8) | uint16_t(this->data_[start_index + 1]);
 }
 void PMSX003Component::dump_config() {
-  ESP_LOGCONFIG(TAG, "PMSX003:");
+  ESP_LOGCONFIG(TAG, "PMSX003 (stabilising ms=%d):", stabilising_ms_);
   LOG_SENSOR("  ", "PM1.0STD", this->pm_1_0_std_sensor_);
   LOG_SENSOR("  ", "PM2.5STD", this->pm_2_5_std_sensor_);
   LOG_SENSOR("  ", "PM10.0STD", this->pm_10_0_std_sensor_);
