@@ -1,14 +1,22 @@
 #include "max31856.h"
 
+#include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
-#include <cmath>
 
 namespace esphome::max31856 {
 
 ESPHOME_LOG_TAG(TAG, "max31856");
 
 static constexpr uint32_t READ_TIMEOUT_ID = 0;
+static constexpr uint32_t CONFIGURE_TIMEOUT_ID = 1;
+
+// Longest conversion any earlier configuration could still be running when the ESP restarts while the
+// chip keeps power: a 50 Hz one-shot of 16 samples (185 + 15 * 40 ms) plus the longest open-circuit test (125 ms).
+static constexpr uint32_t MAX_CONVERSION_TIME_MS = 1000;
+// An over- or undervoltage fault stops conversions, so DRDY never falls; check the faults this often anyway.
+static constexpr uint32_t FAULT_CHECK_INTERVAL_MS = 1000;
 
 enum MAX31856RegisterMasks : uint8_t { SPI_WRITE_M = 0x80 };
 
@@ -41,7 +49,7 @@ enum MAX31856Registers : uint8_t {
 static constexpr uint8_t MAX31856_CR0_REG = 0x00;
 static constexpr uint8_t MAX31856_CR0_AUTOCONVERT = 1 << 7;
 static constexpr uint8_t MAX31856_CR0_1SHOT = 1 << 6;
-static constexpr uint8_t MAX31856_CR0_OCFAULT_ENABLED = 1 << 4;
+static constexpr uint8_t MAX31856_CR0_OCFAULT01 = 1 << 4;
 static constexpr uint8_t MAX31856_CR0_CJ_SENSOR_DISABLE = 1 << 3;
 static constexpr uint8_t MAX31856_CR0_FAULT_INT_MODE = 1 << 2;
 static constexpr uint8_t MAX31856_CR0_FAULTCLR = 1 << 1;
@@ -54,24 +62,35 @@ static uint8_t samples_per_value_to_int(MAX31856SamplesPerValue value) { return 
 
 void MAX31856Sensor::setup() {
   this->spi_setup();
+  this->disable_loop();
+  if (this->data_ready_ != nullptr) {
+    // Data ready is active low
+    this->data_ready_->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
 
-  // assert on any fault
-  this->write_register_(MAX31856_MASK_REG, 0x0);
+  // The filter and averaging may only change while no conversion runs. The chip keeps converting when only
+  // the ESP restarts, so stop it and let the last conversion finish before configuring.
+  if ((this->read_register_(MAX31856_CR0_REG) & (MAX31856_CR0_AUTOCONVERT | MAX31856_CR0_1SHOT)) != 0) {
+    this->write_register_(MAX31856_CR0_REG, 0);
+    this->set_timeout(CONFIGURE_TIMEOUT_ID, MAX_CONVERSION_TIME_MS, [this]() { this->configure_(); });
+  } else {
+    this->configure_();
+  }
+}
 
+void MAX31856Sensor::configure_() {
   // Set the thermocouple type and the number of samples to average
   this->write_register_(MAX31856_CR1_REG, static_cast<uint8_t>(this->samples_per_value_) |
                                               (static_cast<uint8_t>(this->thermocouple_type_) & 0x0F));
 
   // Turn on open circuit faults and set the filter
-  this->cr0_ = MAX31856_CR0_OCFAULT_ENABLED | static_cast<uint8_t>(this->filter_);
+  this->cr0_ = MAX31856_CR0_OCFAULT01 | static_cast<uint8_t>(this->filter_);
 
   if (this->data_ready_ != nullptr) {
-    // Autoconversion mode: the data ready pin drives reads
     this->cr0_ |= MAX31856_CR0_AUTOCONVERT;
-    // Data ready is active low
-    this->data_ready_->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+    this->last_fault_check_ = millis();
+    this->enable_loop();
   } else {
-    this->disable_loop();
     this->set_interval(this->update_interval_, [this]() { this->start_oneshot_(); });
   }
 
@@ -104,97 +123,98 @@ void MAX31856Sensor::dump_config() {
 
 // Used in autoconversion mode
 void MAX31856Sensor::loop() {
-  if (this->have_faults_()) {
+  const uint32_t now = App.get_loop_component_start_time();
+
+  // Data ready is active low
+  if (this->data_ready_->digital_read()) {
+    if (now - this->last_fault_check_ >= FAULT_CHECK_INTERVAL_MS) {
+      this->last_fault_check_ = now;
+      this->check_faults_();
+    }
     return;
   }
 
-  // Data ready is active low
-  if (!this->data_ready_->digital_read()) {
-    this->read_thermocouple_temperature_();
+  this->last_fault_check_ = now;
+  const bool valid = !this->check_faults_();
+  // Reading the temperature also releases DRDY, so read it even when the value is not published
+  const uint32_t raw = this->read_register24_(MAX31856_LTCBH_REG);
+  if (valid) {
+    this->publish_temperature_(raw);
   }
 }
 
 // Used in polling mode
 void MAX31856Sensor::start_oneshot_() {
-  // Start a oneshot reading
   this->write_register_(MAX31856_CR0_REG, this->cr0_ | MAX31856_CR0_1SHOT);
-
-  // Datasheet max conversion time for 1 shot for 1 sample is 155ms for 60Hz / 185ms for 50Hz,
-  // plus 33.33ms (60Hz) or 40ms (50Hz) for each additional sample
-  const uint32_t extra_samples = samples_per_value_to_int(this->samples_per_value_) - 1;
-  const uint32_t timeout =
-      this->filter_ == FILTER_60HZ ? 155 + (extra_samples * 100 + 2) / 3 : 185 + extra_samples * 40;
-  this->set_timeout(READ_TIMEOUT_ID, timeout, [this]() { this->read_oneshot_temperature_(); });
+  this->set_timeout(READ_TIMEOUT_ID, this->conversion_time_ms_, [this]() { this->read_oneshot_temperature_(); });
 }
 
 void MAX31856Sensor::read_oneshot_temperature_() {
-  if (this->have_faults_()) {
-    return;
+  if (!this->check_faults_()) {
+    this->publish_temperature_(this->read_register24_(MAX31856_LTCBH_REG));
   }
-
-  this->read_thermocouple_temperature_();
 }
 
-void MAX31856Sensor::read_thermocouple_temperature_() {
+void MAX31856Sensor::publish_temperature_(uint32_t raw) {
   // bottom 5 bits are unused
-  const int32_t temp24 = sign_extend<24>(this->read_register24_(MAX31856_LTCBH_REG)) >> 5;
-
+  const int32_t temp24 = sign_extend<24>(raw) >> 5;
   const float temp_c = temp24 * 0.0078125f;
 
   ESP_LOGD(TAG, "Got thermocouple temperature: %.3f°C", temp_c);
   this->publish_state(temp_c);
 }
 
-bool MAX31856Sensor::have_faults_() {
+// Returns true when a fault makes the current reading invalid
+bool MAX31856Sensor::check_faults_() {
   const uint8_t faults = this->read_register_(MAX31856_SR_REG);
-  if (faults == 0) {
+  const uint8_t new_faults = faults & ~this->faults_;
+  const bool had_faults = this->faults_ != 0;
+  this->faults_ = faults;
+
 #ifdef USE_BINARY_SENSOR
-    if (this->has_fault_binary_sensor_ != nullptr) {
-      this->has_fault_binary_sensor_->publish_state(false);
-    }
+  if (this->has_fault_binary_sensor_ != nullptr) {
+    this->has_fault_binary_sensor_->publish_state(faults != 0);
+  }
 #endif
+
+  if (faults == 0) {
+    if (had_faults) {
+      ESP_LOGI(TAG, "Faults cleared: '%s'", LOG_STR_ARG(this->get_log_name()));
+    }
     this->status_clear_warning();
     return false;
   }
 
-  if (this->status_has_warning()) {
-    // Faults were already reported
-    return true;
-  }
-
-#ifdef USE_BINARY_SENSOR
-  if (this->has_fault_binary_sensor_ != nullptr) {
-    this->has_fault_binary_sensor_->publish_state(true);
-  }
-#endif
   this->status_set_warning();
 
-  if ((faults & MAX31856_FAULT_CJRANGE) != 0) {
+  if ((new_faults & MAX31856_FAULT_CJRANGE) != 0) {
     ESP_LOGW(TAG, "Cold Junction Out-of-Range: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_TCRANGE) != 0) {
+  if ((new_faults & MAX31856_FAULT_TCRANGE) != 0) {
     ESP_LOGW(TAG, "Thermocouple Out-of-Range: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_CJHIGH) != 0) {
+  if ((new_faults & MAX31856_FAULT_CJHIGH) != 0) {
     ESP_LOGW(TAG, "Cold-Junction High Fault: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_CJLOW) != 0) {
+  if ((new_faults & MAX31856_FAULT_CJLOW) != 0) {
     ESP_LOGW(TAG, "Cold-Junction Low Fault: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_TCHIGH) != 0) {
+  if ((new_faults & MAX31856_FAULT_TCHIGH) != 0) {
     ESP_LOGW(TAG, "Thermocouple Temperature High Fault: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_TCLOW) != 0) {
+  if ((new_faults & MAX31856_FAULT_TCLOW) != 0) {
     ESP_LOGW(TAG, "Thermocouple Temperature Low Fault: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_OVUV) != 0) {
+  if ((new_faults & MAX31856_FAULT_OVUV) != 0) {
     ESP_LOGW(TAG, "Overvoltage or Undervoltage Input Fault: '%s'", LOG_STR_ARG(this->get_log_name()));
   }
-  if ((faults & MAX31856_FAULT_OPEN) != 0) {
+  if ((new_faults & MAX31856_FAULT_OPEN) != 0) {
     ESP_LOGW(TAG, "Thermocouple Open-Circuit Fault (possibly not connected): '%s'", LOG_STR_ARG(this->get_log_name()));
   }
 
-  return true;
+  // An out-of-range temperature is clamped to the range limit and still published; with an open circuit or
+  // an input voltage fault the reading is meaningless or stale.
+  return (faults & (MAX31856_FAULT_OPEN | MAX31856_FAULT_OVUV)) != 0;
 }
 
 void MAX31856Sensor::write_register_(uint8_t reg, uint8_t value) {

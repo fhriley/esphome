@@ -7,6 +7,7 @@ from esphome.const import (
     CONF_THERMOCOUPLE_TYPE,
     CONF_UPDATE_INTERVAL,
     DEVICE_CLASS_TEMPERATURE,
+    SCHEDULER_DONT_RUN,
     STATE_CLASS_MEASUREMENT,
     UNIT_CELSIUS,
 )
@@ -41,10 +42,43 @@ EXCLUSIVE_ERR_MSG = "Use only one of data_ready_pin or update_interval"
 DEFAULT_UPDATE_INTERVAL = TimePeriodMilliseconds(seconds=60)
 
 
-def _default_update_interval(config: ConfigType) -> ConfigType:
-    """Poll every 60s unless the data ready pin selects autoconversion mode."""
-    if CONF_DATA_READY_PIN not in config and CONF_UPDATE_INTERVAL not in config:
+# Datasheet maximum for a one-shot conversion of one sample, by mains filter frequency
+ONE_SHOT_BASE_MS = {50: 185, 60: 155}
+# Each extra averaged sample: typically 40 ms (50 Hz) or 33.33 ms (60 Hz), plus 10% margin
+EXTRA_SAMPLE_MS = {50: 44, 60: 37}
+# Maximum open-circuit test time with the cold-junction sensor enabled (Table 4, OCFAULT = 01)
+OPEN_CIRCUIT_TEST_MS = 15
+
+
+def _conversion_time_ms(config: ConfigType) -> int:
+    """Worst-case time for one one-shot conversion."""
+    mains = int(config[CONF_MAINS_FILTER])
+    samples = int(config[CONF_SAMPLES_PER_VALUE])
+    return (
+        ONE_SHOT_BASE_MS[mains]
+        + (samples - 1) * EXTRA_SAMPLE_MS[mains]
+        + OPEN_CIRCUIT_TEST_MS
+    )
+
+
+def _validate_update_interval(config: ConfigType) -> ConfigType:
+    """Poll every 60s unless the data ready pin selects autoconversion mode.
+
+    A poll starts a new conversion, so the interval must be longer than one conversion.
+    """
+    if CONF_DATA_READY_PIN in config:
+        return config
+    if CONF_UPDATE_INTERVAL not in config:
         config[CONF_UPDATE_INTERVAL] = DEFAULT_UPDATE_INTERVAL
+    interval = config[CONF_UPDATE_INTERVAL].total_milliseconds
+    conversion_time = _conversion_time_ms(config)
+    if interval != SCHEDULER_DONT_RUN and interval <= conversion_time:
+        raise cv.Invalid(
+            f"{CONF_UPDATE_INTERVAL} must be longer than the {conversion_time}ms a conversion takes "
+            f"with {CONF_MAINS_FILTER} {int(config[CONF_MAINS_FILTER])}Hz and "
+            f"{CONF_SAMPLES_PER_VALUE} {int(config[CONF_SAMPLES_PER_VALUE])}",
+            path=[CONF_UPDATE_INTERVAL],
+        )
     return config
 
 
@@ -77,7 +111,7 @@ CONFIG_SCHEMA = cv.All(
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(spi.spi_device_schema()),
-    _default_update_interval,
+    _validate_update_interval,
 )
 
 
@@ -91,3 +125,4 @@ async def to_code(config: ConfigType) -> None:
     await cg.add_pin(var.set_data_ready_pin, config.get(CONF_DATA_READY_PIN))
     if (update_interval := config.get(CONF_UPDATE_INTERVAL)) is not None:
         cg.add(var.set_update_interval(update_interval))
+        cg.add(var.set_conversion_time(_conversion_time_ms(config)))

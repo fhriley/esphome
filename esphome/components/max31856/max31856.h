@@ -59,6 +59,8 @@ class MAX31856Sensor final : public sensor::Sensor,
   void set_samples_per_value(MAX31856SamplesPerValue value) { this->samples_per_value_ = value; }
   void set_data_ready_pin(GPIOPin *pin) { this->data_ready_ = pin; }
   void set_update_interval(uint32_t update_interval) { this->update_interval_ = update_interval; }
+  /// Worst-case time for one one-shot conversion with the configured filter and averaging.
+  void set_conversion_time(uint16_t conversion_time_ms) { this->conversion_time_ms_ = conversion_time_ms; }
 
  protected:
   MAX31856ThermocoupleType thermocouple_type_{MAX31856_TCTYPE_K};
@@ -66,12 +68,16 @@ class MAX31856Sensor final : public sensor::Sensor,
   MAX31856SamplesPerValue samples_per_value_{AVE_SAMPLES_1};
   GPIOPin *data_ready_{nullptr};
   uint32_t update_interval_{SCHEDULER_DONT_RUN};
+  uint32_t last_fault_check_{0};
+  uint16_t conversion_time_ms_{0};
   uint8_t cr0_{};
+  uint8_t faults_{0};
 
+  void configure_();
   void start_oneshot_();
   void read_oneshot_temperature_();
-  void read_thermocouple_temperature_();
-  bool have_faults_();
+  void publish_temperature_(uint32_t raw);
+  bool check_faults_();
 
   uint8_t read_register_(uint8_t reg);
   uint32_t read_register24_(uint8_t reg);
