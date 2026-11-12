@@ -1,27 +1,22 @@
 from esphome import pins
 import esphome.codegen as cg
-from esphome.components import binary_sensor, sensor, spi
+from esphome.components import sensor, spi
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_MAINS_FILTER,
     CONF_THERMOCOUPLE_TYPE,
     CONF_UPDATE_INTERVAL,
-    DEVICE_CLASS_PROBLEM,
     DEVICE_CLASS_TEMPERATURE,
-    ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     UNIT_CELSIUS,
 )
+from esphome.core import TimePeriodMilliseconds
 from esphome.types import ConfigType
 
-CONF_DATA_READY_PIN = "data_ready_pin"
-CONF_HAS_FAULT = "has_fault"
-CONF_SAMPLES_PER_VALUE = "samples_per_value"
+from . import MAX31856Sensor, max31856_ns
 
-max31856_ns = cg.esphome_ns.namespace("max31856")
-MAX31856Sensor = max31856_ns.class_(
-    "MAX31856Sensor", sensor.Sensor, cg.PollingComponent, spi.SPIDevice
-)
+CONF_DATA_READY_PIN = "data_ready_pin"
+CONF_SAMPLES_PER_VALUE = "samples_per_value"
 
 MAX31865ConfigFilter = max31856_ns.enum("MAX31856ConfigFilter")
 FILTER = {
@@ -43,17 +38,17 @@ SAMPLES_PER_VALUE = {
 }
 
 EXCLUSIVE_ERR_MSG = "Use only one of data_ready_pin or update_interval"
+DEFAULT_UPDATE_INTERVAL = TimePeriodMilliseconds(seconds=60)
 
-# Exclusive doesn't pass a default through to the base Optional, so set it manually
-exclusive_update_interval_with_default = cv.Exclusive(
-    CONF_UPDATE_INTERVAL,
-    "mode",
-    EXCLUSIVE_ERR_MSG,
-    "update_interval will enable polling mode",
-)
-exclusive_update_interval_with_default.default = lambda: "60s"
 
-CONFIG_SCHEMA = (
+def _default_update_interval(config: ConfigType) -> ConfigType:
+    """Poll every 60s unless the data ready pin selects autoconversion mode."""
+    if CONF_DATA_READY_PIN not in config and CONF_UPDATE_INTERVAL not in config:
+        config[CONF_UPDATE_INTERVAL] = DEFAULT_UPDATE_INTERVAL
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
     sensor.sensor_schema(
         MAX31856Sensor,
         unit_of_measurement=UNIT_CELSIUS,
@@ -63,10 +58,6 @@ CONFIG_SCHEMA = (
     )
     .extend(
         {
-            cv.Optional(CONF_HAS_FAULT): binary_sensor.binary_sensor_schema(
-                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-                device_class=DEVICE_CLASS_PROBLEM,
-            ),
             cv.Optional(CONF_MAINS_FILTER, default="60Hz"): cv.All(
                 cv.frequency, cv.enum(FILTER, int=True)
             ),
@@ -77,15 +68,16 @@ CONFIG_SCHEMA = (
                 SAMPLES_PER_VALUE, int=True
             ),
             cv.Exclusive(
-                CONF_DATA_READY_PIN,
-                "mode",
-                EXCLUSIVE_ERR_MSG,
-                "data_ready_pin will enable autoconversion mode",
+                CONF_DATA_READY_PIN, "mode", EXCLUSIVE_ERR_MSG
             ): pins.gpio_input_pullup_pin_schema,
-            exclusive_update_interval_with_default: cv.update_interval,
+            cv.Exclusive(
+                CONF_UPDATE_INTERVAL, "mode", EXCLUSIVE_ERR_MSG
+            ): cv.update_interval,
         }
     )
-    .extend(spi.spi_device_schema())
+    .extend(cv.COMPONENT_SCHEMA)
+    .extend(spi.spi_device_schema()),
+    _default_update_interval,
 )
 
 
@@ -96,9 +88,6 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_filter(config[CONF_MAINS_FILTER]))
     cg.add(var.set_thermocouple_type(config[CONF_THERMOCOUPLE_TYPE]))
     cg.add(var.set_samples_per_value(config[CONF_SAMPLES_PER_VALUE]))
-    if (data_ready_config := config.get(CONF_DATA_READY_PIN)) is not None:
-        pin = await cg.gpio_pin_expression(data_ready_config)
-        cg.add(var.set_data_ready_pin(pin))
-    if (has_fault := config.get(CONF_HAS_FAULT)) is not None:
-        sens = await binary_sensor.new_binary_sensor(has_fault)
-        cg.add(var.set_has_fault_binary_sensor(sens))
+    await cg.add_pin(var.set_data_ready_pin, config.get(CONF_DATA_READY_PIN))
+    if (update_interval := config.get(CONF_UPDATE_INTERVAL)) is not None:
+        cg.add(var.set_update_interval(update_interval))

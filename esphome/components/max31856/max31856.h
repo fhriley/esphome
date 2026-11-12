@@ -40,7 +40,7 @@ enum MAX31856SamplesPerValue : uint8_t {
 };
 
 class MAX31856Sensor final : public sensor::Sensor,
-                             public PollingComponent,
+                             public Component,
                              public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
                                                    spi::CLOCK_PHASE_TRAILING, spi::DATA_RATE_4MHZ> {
 #ifdef USE_BINARY_SENSOR
@@ -50,7 +50,6 @@ class MAX31856Sensor final : public sensor::Sensor,
  public:
   void setup() override;
   void loop() override;
-  void update() override;
   void dump_config() override;
 
   void set_thermocouple_type(MAX31856ThermocoupleType thermocouple_type) {
@@ -59,14 +58,17 @@ class MAX31856Sensor final : public sensor::Sensor,
   void set_filter(MAX31856ConfigFilter filter) { this->filter_ = filter; }
   void set_samples_per_value(MAX31856SamplesPerValue value) { this->samples_per_value_ = value; }
   void set_data_ready_pin(GPIOPin *pin) { this->data_ready_ = pin; }
+  void set_update_interval(uint32_t update_interval) { this->update_interval_ = update_interval; }
 
  protected:
   MAX31856ThermocoupleType thermocouple_type_{MAX31856_TCTYPE_K};
   MAX31856ConfigFilter filter_{FILTER_60HZ};
   MAX31856SamplesPerValue samples_per_value_{AVE_SAMPLES_1};
   GPIOPin *data_ready_{nullptr};
+  uint32_t update_interval_{SCHEDULER_DONT_RUN};
   uint8_t cr0_{};
 
+  void start_oneshot_();
   void read_oneshot_temperature_();
   void read_thermocouple_temperature_();
   bool have_faults_();

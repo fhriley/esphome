@@ -5,3 +5,16 @@ sensor:
     update_interval: 15s
     mains_filter: 50Hz
     thermocouple_type: N
+  - platform: max31856
+    id: max31856_autoconversion
+    name: MAX31856 Autoconversion Temperature
+    cs_pin: ${cs_pin_2}
+    data_ready_pin: ${data_ready_pin}
+    samples_per_value: 4
+    thermocouple_type: J
+
+binary_sensor:
+  - platform: max31856
+    max31856_id: max31856_autoconversion
+    has_fault:
+      name: MAX31856 Fault

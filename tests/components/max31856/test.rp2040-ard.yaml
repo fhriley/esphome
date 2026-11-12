@@ -3,6 +3,8 @@ substitutions:
   mosi_pin: GPIO3
   miso_pin: GPIO4
   cs_pin: GPIO5
+  cs_pin_2: GPIO6
+  data_ready_pin: GPIO7
 
 packages:
   spi: !include ../../test_build_components/common/spi/rp2040-ard.yaml

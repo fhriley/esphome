@@ -66,13 +66,13 @@ void MAX31856Sensor::setup() {
   this->cr0_ = MAX31856_CR0_OCFAULT_ENABLED | static_cast<uint8_t>(this->filter_);
 
   if (this->data_ready_ != nullptr) {
-    // Autoconversion mode: the data ready pin drives reads, not the poller
-    this->stop_poller();
+    // Autoconversion mode: the data ready pin drives reads
     this->cr0_ |= MAX31856_CR0_AUTOCONVERT;
     // Data ready is active low
     this->data_ready_->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
   } else {
     this->disable_loop();
+    this->set_interval(this->update_interval_, [this]() { this->start_oneshot_(); });
   }
 
   this->write_register_(MAX31856_CR0_REG, this->cr0_);
@@ -83,8 +83,11 @@ void MAX31856Sensor::dump_config() {
   LOG_PIN("  CS Pin: ", this->cs_);
   if (this->data_ready_ != nullptr) {
     LOG_PIN("  Data Ready Pin: ", this->data_ready_);
+  } else if (this->update_interval_ == SCHEDULER_DONT_RUN) {
+    ESP_LOGCONFIG(TAG, "  Update Interval: never");
   } else {
-    LOG_UPDATE_INTERVAL(this);
+    ESP_LOGCONFIG(TAG, "  Update Interval: %" PRIu32 ".%03" PRIu32 "s", this->update_interval_ / 1000,
+                  this->update_interval_ % 1000);
   }
   ESP_LOGCONFIG(TAG,
                 "  Mains Filter: %s\n"
@@ -112,7 +115,7 @@ void MAX31856Sensor::loop() {
 }
 
 // Used in polling mode
-void MAX31856Sensor::update() {
+void MAX31856Sensor::start_oneshot_() {
   // Start a oneshot reading
   this->write_register_(MAX31856_CR0_REG, this->cr0_ | MAX31856_CR0_1SHOT);
 
