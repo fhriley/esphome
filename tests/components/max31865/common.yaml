@@ -5,3 +5,18 @@ sensor:
     update_interval: 15s
     reference_resistance: 430 Ω
     rtd_nominal_resistance: 100 Ω
+  - platform: max31865
+    id: max31865_autoconversion
+    name: MAX31865 Autoconversion Temperature
+    cs_pin: ${cs_pin_2}
+    data_ready_pin: ${data_ready_pin}
+    reference_resistance: 4300 Ω
+    rtd_nominal_resistance: 1000 Ω
+    rtd_wires: 3
+    mains_filter: 50Hz
+
+binary_sensor:
+  - platform: max31865
+    max31865_id: max31865_autoconversion
+    has_fault:
+      name: MAX31865 Fault
